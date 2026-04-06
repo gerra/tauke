@@ -1,37 +1,46 @@
 """
-Tracks token usage locally in ~/.tauke/identity.json.
-Resets daily.
+Reads actual Claude Code token usage from ~/.claude/stats-cache.json.
+This is the same data shown by /usage in Claude Code — no manual tracking needed.
 """
 
+import json
 from datetime import date
-from tauke.lib.config import identity, save_identity
+from pathlib import Path
+
+from tauke.lib.config import identity, DEFAULT_WORKER_CAP
+
+STATS_CACHE = Path.home() / ".claude" / "stats-cache.json"
+
+
+def today_tokens() -> int:
+    """
+    Read today's total token count across all models from Claude Code's
+    local stats cache. Returns 0 if the file doesn't exist or has no
+    entry for today.
+    """
+    if not STATS_CACHE.exists():
+        return 0
+    try:
+        data = json.loads(STATS_CACHE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return 0
+
+    today = str(date.today())
+    for entry in data.get("dailyModelTokens", []):
+        if entry.get("date") == today:
+            return sum(entry.get("tokensByModel", {}).values())
+    return 0
+
+
+def snapshot() -> int:
+    """Return current today's token total (use before/after a claude run to diff)."""
+    return today_tokens()
 
 
 def get_usage() -> tuple[int, int]:
     """Returns (tokens_used_today, daily_cap)."""
-    data = identity()
-    worker = data.get("worker", {})
-    today = str(date.today())
-    if worker.get("reset_date") != today:
-        worker["tokens_used_today"] = 0
-        worker["reset_date"] = today
-        data["worker"] = worker
-        save_identity(data)
-    return worker.get("tokens_used_today", 0), worker.get("daily_cap", 50_000)
-
-
-def add_usage(tokens: int) -> int:
-    """Add tokens used, reset if new day. Returns new total."""
-    data = identity()
-    worker = data.get("worker", {})
-    today = str(date.today())
-    if worker.get("reset_date") != today:
-        worker["tokens_used_today"] = 0
-        worker["reset_date"] = today
-    worker["tokens_used_today"] = worker.get("tokens_used_today", 0) + tokens
-    data["worker"] = worker
-    save_identity(data)
-    return worker["tokens_used_today"]
+    cap = identity().get("worker", {}).get("daily_cap", DEFAULT_WORKER_CAP)
+    return today_tokens(), cap
 
 
 def remaining() -> int:

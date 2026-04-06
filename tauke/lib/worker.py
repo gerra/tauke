@@ -18,7 +18,7 @@ from tauke.lib.config import (
     identity,
     projects,
 )
-from tauke.lib.token_tracker import add_usage, get_usage, remaining
+from tauke.lib.token_tracker import get_usage, remaining
 
 
 POLL_INTERVAL = 30  # seconds
@@ -119,9 +119,8 @@ def _poll_all_projects():
         except OSError as e:
             print(f"[tauke worker] Failed to write result: {e}", flush=True)
 
-        if result.get("tokens_used"):
-            add_usage(result["tokens_used"])
-            used = get_usage()[0]
+        # stats-cache.json updates automatically — just re-read it
+        used = get_usage()[0]
 
 
 def _execute_task(task: dict, handle: str) -> dict:
