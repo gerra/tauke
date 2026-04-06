@@ -9,3 +9,6 @@ venv/
 
 # tauke runtime (machine-local, never commit)
 .tauke/
+
+# Claude Code local settings
+.claude/
