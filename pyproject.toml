@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tauke"
+version = "0.1.0"
+description = "Distributed Claude Code token sharing for teams"
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.12",
+    "rich>=13",
+]
+
+[project.scripts]
+tauke = "tauke.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tauke"]
