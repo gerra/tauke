@@ -6,13 +6,16 @@ Operations on the coordination git repo:
 """
 
 import json
-import os
-from datetime import date, datetime, timezone
+import subprocess
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 from tauke.lib import git_helpers as git
 from tauke.lib.config import COORD_REPOS_DIR
+from tauke.lib.logger import get
+
+_log = get("coord_repo")
 
 
 def _local_clone_path(remote_url: str) -> Path:
@@ -22,39 +25,48 @@ def _local_clone_path(remote_url: str) -> Path:
 
 def ensure_coord(remote_url: str, coord_branch: str = "tauke-coord") -> Path:
     """
-    Ensure a local clone of the project repo exists with the coord branch checked out.
-    Pulls latest on each call.
+    Ensure a local clone of the project repo exists with the coord branch
+    checked out. Pulls latest on each call.
     """
     dest = _local_clone_path(remote_url)
+    _log.debug("ensure_coord %s branch=%s dest=%s", remote_url, coord_branch, dest)
     if not dest.exists():
-        # Clone and switch to the coord branch
+        _log.info("cloning %s for coord branch %s", remote_url, coord_branch)
         git.clone(remote_url, dest)
         _checkout_coord_branch(dest, coord_branch)
     else:
         try:
             git.pull(dest)
-        except Exception:
-            pass  # offline or conflict — work with what we have
+        except OSError as e:
+            _log.warning("pull failed, continuing with local state: %s", e)
     return dest
 
 
 def _checkout_coord_branch(repo: Path, branch: str) -> None:
-    """Switch to the coord branch. If it doesn't exist remotely, create it as orphan."""
-    import subprocess
-    # Try to checkout the existing remote branch
-    result = git.run(["checkout", "-b", branch, f"origin/{branch}"], cwd=repo, check=False)
+    """Switch to the coord branch. Create as orphan if it doesn't exist yet."""
+    _log.info("checking out coord branch '%s' in %s", branch, repo)
+    result = git.run(
+        ["checkout", "-b", branch, f"origin/{branch}"],
+        cwd=repo,
+        check=False,
+    )
     if result.returncode == 0:
+        _log.debug("checked out existing remote branch %s", branch)
         return
 
-    # Branch doesn't exist yet — create orphan (no history from main)
+    _log.info("branch '%s' not on remote — creating orphan", branch)
     git.run(["checkout", "--orphan", branch], cwd=repo)
-    # Remove everything from the index (orphan inherits index from current branch)
-    subprocess.run(["git", "rm", "-rf", "."], cwd=str(repo), capture_output=True)
+    subprocess.run(
+        ["git", "rm", "-rf", "."],
+        cwd=str(repo),
+        capture_output=True,
+    )
     _ensure_structure(repo)
 
 
 def _ensure_structure(repo: Path) -> None:
     """Create the required directories and push."""
+    _log.debug("ensuring coord repo structure in %s", repo)
     for subdir in ("tasks", "claims", "results", "workers"):
         (repo / subdir).mkdir(parents=True, exist_ok=True)
         gitkeep = repo / subdir / ".gitkeep"
@@ -63,7 +75,9 @@ def _ensure_structure(repo: Path) -> None:
     if git.has_changes(repo):
         git.add_all(repo)
         git.commit(repo, "tauke: initialize coord branch")
-        git.push_new_branch(repo, _current_branch(repo))
+        branch = _current_branch(repo)
+        _log.info("pushing new coord branch '%s'", branch)
+        git.push_new_branch(repo, branch)
 
 
 def _current_branch(repo: Path) -> str:
@@ -74,11 +88,13 @@ def _current_branch(repo: Path) -> str:
 # ── Tasks ────────────────────────────────────────────────────────────────────
 
 def write_task(repo: Path, task: dict) -> None:
+    _log.info("writing task %s (orchestrator=%s)", task['id'][:8], task.get('orchestrator'))
     path = repo / "tasks" / f"{task['id']}.json"
     path.write_text(json.dumps(task, indent=2))
     git.add_all(repo)
     git.commit(repo, f"tauke: submit task {task['id'][:8]}")
     git.push(repo)
+    _log.info("task %s pushed to coord branch", task['id'][:8])
 
 
 def list_pending_tasks(repo: Path, allowed_orchestrators: list[str]) -> list[dict]:
@@ -89,21 +105,33 @@ def list_pending_tasks(repo: Path, allowed_orchestrators: list[str]) -> list[dic
     for f in sorted(tasks_dir.glob("*.json")):
         if f.name == ".gitkeep":
             continue
-        task = json.loads(f.read_text())
+        try:
+            task = json.loads(f.read_text())
+        except json.JSONDecodeError as e:
+            _log.warning("could not parse task file %s: %s", f, e)
+            continue
         task_id = task.get("id", f.stem)
-        # skip if claimed or already has result
         if (claims_dir / f"{task_id}.json").exists():
+            _log.debug("task %s already claimed, skipping", task_id[:8])
             continue
         if (results_dir / f"{task_id}.json").exists():
+            _log.debug("task %s already has result, skipping", task_id[:8])
             continue
         if task.get("orchestrator") in allowed_orchestrators:
             pending.append(task)
+        else:
+            _log.debug(
+                "task %s orchestrator '%s' not in allowlist %s",
+                task_id[:8], task.get('orchestrator'), allowed_orchestrators,
+            )
+    _log.debug("found %d pending tasks", len(pending))
     return pending
 
 
 def read_result(repo: Path, task_id: str) -> Optional[dict]:
     path = repo / "results" / f"{task_id}.json"
     if path.exists():
+        _log.debug("result ready for task %s", task_id[:8])
         return json.loads(path.read_text())
     return None
 
@@ -112,55 +140,70 @@ def read_result(repo: Path, task_id: str) -> Optional[dict]:
 
 def try_claim(repo: Path, task_id: str, handle: str) -> bool:
     """
-    Attempt to atomically claim a task. Returns True on success.
-    If another worker claimed it first (push rejected), returns False.
+    Attempt to atomically claim a task via optimistic git push.
+    Returns True on success, False if another worker claimed it first.
     """
+    _log.info("attempting to claim task %s as %s", task_id[:8], handle)
     git.pull(repo)
-    # Double-check it's still unclaimed after pull
+
     claim_path = repo / "claims" / f"{task_id}.json"
     if claim_path.exists():
+        _log.info("task %s already claimed after pull", task_id[:8])
         return False
 
-    claim = {
-        "task_id": task_id,
-        "worker": handle,
-        "claimed_at": _now(),
-    }
+    claim = {"task_id": task_id, "worker": handle, "claimed_at": _now()}
     claim_path.write_text(json.dumps(claim, indent=2))
     git.add_all(repo)
     git.commit(repo, f"tauke: claim task {task_id[:8]} by {handle}")
     result = git.push(repo)
+
     if result.returncode != 0:
-        # Push rejected — someone else claimed first
-        git.run(["checkout", "--", str(claim_path.relative_to(repo))], cwd=repo)
+        _log.warning(
+            "claim push rejected for task %s (race condition) — rolling back",
+            task_id[:8],
+        )
+        git.run(
+            ["checkout", "--", str(claim_path.relative_to(repo))],
+            cwd=repo,
+        )
         git.pull(repo)
         return False
+
+    _log.info("claimed task %s successfully", task_id[:8])
     return True
 
 
 # ── Results ──────────────────────────────────────────────────────────────────
 
 def write_result(repo: Path, result: dict) -> None:
-    path = repo / "results" / f"{result['task_id']}.json"
+    task_id = result['task_id']
+    _log.info(
+        "writing result for task %s: status=%s tokens=%s",
+        task_id[:8], result.get('status'), result.get('tokens_used'),
+    )
+    path = repo / "results" / f"{task_id}.json"
     path.write_text(json.dumps(result, indent=2))
     git.add_all(repo)
-    git.commit(repo, f"tauke: result for task {result['task_id'][:8]} ({result['status']})")
+    git.commit(repo, f"tauke: result for task {task_id[:8]} ({result['status']})")
     git.push(repo)
+    _log.info("result for task %s pushed", task_id[:8])
 
 
 # ── Workers ──────────────────────────────────────────────────────────────────
 
-def write_worker_heartbeat(repo: Path, handle: str, daily_cap: int, tokens_used: int) -> None:
+def write_worker_heartbeat(
+    repo: Path, handle: str, daily_cap: int, tokens_used: int
+) -> None:
     path = repo / "workers" / f"{handle}.json"
     today = str(date.today())
     existing = {}
     if path.exists():
         try:
             existing = json.loads(path.read_text())
-        except Exception:
+        except json.JSONDecodeError:
             pass
-    # Reset if date changed
     if existing.get("reset_date") != today:
+        _log.info("daily reset for worker %s", handle)
         tokens_used = 0
 
     data = {
@@ -176,29 +219,48 @@ def write_worker_heartbeat(repo: Path, handle: str, daily_cap: int, tokens_used:
         git.add_all(repo)
         git.commit(repo, f"tauke: heartbeat {handle}")
         git.push(repo)
+        _log.debug(
+            "heartbeat pushed for %s (%d/%d tokens used today)",
+            handle, tokens_used, daily_cap,
+        )
+    else:
+        _log.debug("heartbeat: no change for %s", handle)
 
 
 def list_available_workers(repo: Path, min_tokens: int = 5_000) -> list[dict]:
-    from datetime import timedelta
     workers_dir = repo / "workers"
     available = []
     now = datetime.now(timezone.utc)
     for f in workers_dir.glob("*.json"):
         if f.name == ".gitkeep":
             continue
-        worker = json.loads(f.read_text())
+        try:
+            worker = json.loads(f.read_text())
+        except json.JSONDecodeError:
+            continue
         if not worker.get("available"):
+            _log.debug("worker %s marked unavailable", f.stem)
             continue
         last_seen_str = worker.get("last_seen")
         if last_seen_str:
             last_seen = datetime.fromisoformat(last_seen_str)
             if last_seen.tzinfo is None:
                 last_seen = last_seen.replace(tzinfo=timezone.utc)
-            if (now - last_seen) > timedelta(minutes=2):
-                continue  # stale
+            age = (now - last_seen).total_seconds()
+            if age > 120:
+                _log.debug(
+                    "worker %s stale (last seen %.0fs ago)", f.stem, age
+                )
+                continue
         remaining = worker.get("daily_cap", 0) - worker.get("tokens_used_today", 0)
         if remaining >= min_tokens:
             available.append({**worker, "remaining_tokens": remaining})
+        else:
+            _log.debug(
+                "worker %s has only %d tokens remaining (min %d)",
+                f.stem, remaining, min_tokens,
+            )
+    _log.debug("found %d available worker(s)", len(available))
     return sorted(available, key=lambda w: w["remaining_tokens"], reverse=True)
 
 

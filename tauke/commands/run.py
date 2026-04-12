@@ -10,8 +10,10 @@ from tauke.lib.config import identity, coord_info
 from tauke.lib.coord_repo import ensure_coord, list_available_workers
 from tauke.lib.task import create_task, submit_and_wait
 from tauke.lib import git_helpers as git
+from tauke.lib.logger import get
 
 console = Console()
+_log = get("cmd.run")
 
 
 def run(
@@ -24,29 +26,36 @@ def run(
     handle = ident["handle"]
     remote_url, coord_branch = coord_info()
 
+    _log.info("tauke run — user=%s coord=%s branch=%s", handle, remote_url, coord_branch)
+
     console.print("Pulling coordination repo...")
     coord_local = ensure_coord(remote_url, coord_branch)
 
-    # Find available workers
     workers = list_available_workers(coord_local)
     if not workers:
+        _log.warning("no available workers found")
         console.print("[yellow]No workers are currently available.[/yellow]")
         console.print("Run the task locally with:")
         console.print(f"  [cyan]claude -p {prompt!r}[/cyan]")
         raise typer.Exit(1)
 
     best = workers[0]
+    _log.info(
+        "routing to worker %s (%d tokens remaining)",
+        best['handle'], best['remaining_tokens'],
+    )
     console.print(
         f"[green]Worker available:[/green] [bold]{best['handle']}[/bold] "
         f"({best['remaining_tokens']:,} tokens remaining)"
     )
 
-    # Read current project context
     try:
         repo_url = git.current_remote_url()
         branch = git.current_branch()
         commit = git.current_commit()
-    except Exception as e:
+        _log.info("project context: repo=%s branch=%s commit=%s", repo_url, branch, commit[:8])
+    except OSError as e:
+        _log.error("could not read git info: %s", e)
         console.print(f"[red]Could not read git info:[/red] {e}")
         raise typer.Exit(1)
 
@@ -85,10 +94,16 @@ def run(
         )
 
     if result is None:
+        _log.error("timed out waiting for task %s after %ds", task['id'][:8], timeout)
         console.print(f"[red]Timed out after {timeout}s.[/red] Task ID: {task['id']}")
         console.print("Check again later with:")
         console.print(f"  [cyan]tauke pull {task['id']}[/cyan]")
         raise typer.Exit(1)
+
+    _log.info(
+        "task %s result: status=%s worker=%s tokens=%d",
+        task['id'][:8], result.get('status'), result.get('worker'), result.get('tokens_used', 0),
+    )
 
     _print_result(result)
 
