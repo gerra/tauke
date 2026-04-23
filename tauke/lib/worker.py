@@ -209,11 +209,29 @@ def _execute_task(task: dict, handle: str) -> dict:
 
     except Exception as e:
         _log.error("task %s failed with exception: %s", task_id[:8], e, exc_info=True)
-        return _result(task_id, handle, "error", None, 0, str(e)[:200], str(e))
+        detail = _error_detail(e)
+        return _result(task_id, handle, "error", None, 0, detail[:200], detail)
     finally:
         if workspace.exists():
             _log.debug("cleaning up workspace %s", workspace)
             shutil.rmtree(workspace, ignore_errors=True)
+
+
+def _error_detail(e: Exception) -> str:
+    """Best-effort extraction of useful info from an exception.
+
+    CalledProcessError's str() is just "Command X returned exit status N",
+    which hides git's actual stderr. If the exception carries a `stderr`
+    attribute (subprocess errors do), include it.
+    """
+    msg = str(e)
+    stderr = getattr(e, "stderr", None)
+    if stderr:
+        stderr_str = stderr.decode() if isinstance(stderr, bytes) else stderr
+        stderr_str = stderr_str.strip()
+        if stderr_str:
+            return f"{msg}: {stderr_str}"
+    return msg
 
 
 def _result(
