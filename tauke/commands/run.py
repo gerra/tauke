@@ -11,6 +11,7 @@ from tauke.lib.coord_repo import ensure_coord, list_available_workers
 from tauke.lib.task import create_task, submit_and_wait
 from tauke.lib import git_helpers as git
 from tauke.lib.logger import get
+from tauke.commands.pull import merge_branch_into_head
 
 console = Console()
 _log = get("cmd.run")
@@ -120,8 +121,14 @@ def _print_result(result: dict):
         if summary:
             console.print(f"  Summary: {summary}")
         if branch:
-            console.print(f"\nResult branch: [cyan]{branch}[/cyan]")
-            console.print(f"To merge: [cyan]tauke pull[/cyan]")
+            console.print(f"Auto-merging [cyan]{branch}[/cyan] into current branch...")
+            ok, err = merge_branch_into_head(branch, worker)
+            if ok:
+                console.print("[green]Merged![/green]")
+            else:
+                console.print(f"[yellow]Auto-merge skipped:[/yellow] {err}")
+                console.print(f"  Branch is available: [cyan]{branch}[/cyan]")
+                console.print(f"  To merge manually: [cyan]tauke pull[/cyan]")
     elif status == "rate_limited":
         console.print(f"\n[yellow]Worker {worker} hit their rate limit.[/yellow]")
         console.print("Re-queue with [cyan]tauke run[/cyan] to try another worker.")

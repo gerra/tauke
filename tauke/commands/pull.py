@@ -43,22 +43,10 @@ def pull(
         raise typer.Exit(1)
 
     console.print(f"Fetching branch [cyan]{result_branch}[/cyan]...")
-    try:
-        git.fetch(Path("."), "origin")
-    except Exception as e:
-        console.print(f"[red]git fetch failed:[/red] {e}")
-        raise typer.Exit(1)
-
     console.print(f"Merging [cyan]{result_branch}[/cyan] into current branch...")
-    try:
-        merge = git.run(["merge", f"origin/{result_branch}", "--no-ff", "-m",
-                         f"tauke: merge result from {result.get('worker', '?')}"])
-        if merge.returncode != 0:
-            console.print("[red]Merge failed (conflicts?):[/red]")
-            console.print(merge.stderr)
-            raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Merge failed:[/red] {e}")
+    ok, err = merge_branch_into_head(result_branch, result.get("worker", "?"))
+    if not ok:
+        console.print(f"[red]Merge failed:[/red] {err}")
         raise typer.Exit(1)
 
     console.print(f"\n[green]Merged successfully![/green]")
@@ -66,6 +54,37 @@ def pull(
     console.print(f"  Tokens  : {result.get('tokens_used', 0):,}")
     if result.get("summary"):
         console.print(f"  Summary : {result['summary']}")
+
+
+def merge_branch_into_head(
+    result_branch: str,
+    worker: str,
+    cwd: Path = Path("."),
+) -> tuple[bool, str]:
+    """Fetch and merge a result branch into the current branch.
+
+    Returns (True, "") on success, (False, reason) otherwise. Never raises —
+    callers decide how to surface failures.
+    """
+    if git.has_changes(cwd):
+        return False, "working tree has uncommitted changes (commit or stash first)"
+    try:
+        git.fetch(cwd, "origin")
+    except Exception as e:
+        return False, f"git fetch failed: {e}"
+    try:
+        merge = git.run(
+            [
+                "merge", f"origin/{result_branch}", "--no-ff",
+                "-m", f"tauke: merge result from {worker}",
+            ],
+            cwd=cwd, check=False,
+        )
+    except Exception as e:
+        return False, str(e)
+    if merge.returncode != 0:
+        return False, (merge.stderr or merge.stdout).strip() or "merge returned non-zero"
+    return True, ""
 
 
 def _find_result(coord_local: Path, task_id_prefix: str) -> dict | None:
