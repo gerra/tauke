@@ -62,7 +62,7 @@ def _poll_all_projects():
     handle = ident["handle"]
     worker_cfg = ident.get("worker", {})
     allowed = worker_cfg.get("allowed_orchestrators", [])
-    daily_cap = worker_cfg.get("daily_cap", 50_000)
+    daily_cap = worker_cfg.get("daily_cap", 1_000_000)
 
     proj_list = projects()
     if not proj_list:

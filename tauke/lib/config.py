@@ -16,7 +16,7 @@ WORKER_PID_FILE = TAUKE_DIR / "worker.pid"
 WORKSPACES_DIR = TAUKE_DIR / "workspaces"
 COORD_REPOS_DIR = TAUKE_DIR / "coord-repos"
 
-DEFAULT_WORKER_CAP = 50_000
+DEFAULT_WORKER_CAP = 1_000_000
 
 
 def identity() -> dict:
