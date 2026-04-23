@@ -32,7 +32,7 @@ def run_claude(prompt: str, cwd: Path, timeout_seconds: int = 900) -> dict:
 
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt],
+            ["claude", "-p", prompt, "--allowedTools", "Read,Write,Edit,Glob,Grep,Bash"],
             cwd=str(cwd),
             capture_output=True,
             text=True,
