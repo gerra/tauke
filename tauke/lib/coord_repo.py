@@ -38,29 +38,51 @@ def ensure_coord(remote_url: str, coord_branch: str = "tauke-coord") -> Path:
         git.clone(remote_url, dest)
         _checkout_coord_branch(dest, coord_branch)
     else:
-        try:
-            git.pull(dest)
-        except Exception as e:
-            _log.warning(
-                "pull failed (%s) — discarding uncommitted changes and retrying",
-                e,
-            )
-            _discard_uncommitted(dest)
-            try:
-                git.pull(dest)
-            except Exception as e2:
-                _log.warning("retry pull still failed: %s — using local state", e2)
+        _pull_or_recover(dest)
     return dest
 
 
-def _discard_uncommitted(repo: Path) -> None:
-    """Discard unstaged + untracked changes only. Preserves local commits
-    (e.g. a commit that was made but whose push got rejected due to a
-    race — we want to keep it so the next push can retry).
+def _pull_or_recover(repo: Path) -> None:
+    """Pull the coord clone, and if that fails with uncommitted cruft,
+    log exactly what was dirty, discard unstaged + untracked changes
+    (preserving local commits), and retry once.
+
+    This only ever runs against ~/.tauke/coord-repos/<project>/ —
+    tauke's internal sync clone. The user's project checkout is a
+    separate directory and is never touched.
 
     Anything unstaged on the coord clone comes from a crashed write
-    (file written but not yet committed), which has no value to preserve.
+    (file written but not yet committed), so there's no value to
+    preserve. Local commits ARE preserved — a committed-but-not-pushed
+    task/claim/result is worth keeping so the next push can retry.
     """
+    try:
+        git.pull(repo)
+        return
+    except Exception as e:
+        dirty = _porcelain_status(repo)
+        _log.warning(
+            "pull failed in %s (%s); dirty files:\n%s\ndiscarding uncommitted and retrying",
+            repo, e, dirty or "(git status returned nothing — unknown state)",
+        )
+        _discard_uncommitted(repo)
+
+    try:
+        git.pull(repo)
+    except Exception as e:
+        _log.warning("retry pull still failed in %s: %s", repo, e)
+
+
+def _porcelain_status(repo: Path) -> str:
+    """Return `git status --porcelain` output for diagnostics."""
+    result = git.run(["status", "--porcelain"], cwd=repo, check=False)
+    if result.returncode != 0:
+        return ""
+    return result.stdout.rstrip()
+
+
+def _discard_uncommitted(repo: Path) -> None:
+    """Discard unstaged + untracked changes only. Preserves local commits."""
     try:
         git.run(["reset", "--hard", "HEAD"], cwd=repo, check=False)
         git.run(["clean", "-fd"], cwd=repo, check=False)
@@ -171,7 +193,7 @@ def try_claim(repo: Path, task_id: str, handle: str) -> bool:
     Returns True on success, False if another worker claimed it first.
     """
     _log.info("attempting to claim task %s as %s", task_id[:8], handle)
-    git.pull(repo)
+    _pull_or_recover(repo)
 
     claim_path = repo / "claims" / f"{task_id}.json"
     if claim_path.exists():
@@ -193,7 +215,7 @@ def try_claim(repo: Path, task_id: str, handle: str) -> bool:
             ["checkout", "--", str(claim_path.relative_to(repo))],
             cwd=repo,
         )
-        git.pull(repo)
+        _pull_or_recover(repo)
         return False
 
     _log.info("claimed task %s successfully", task_id[:8])
