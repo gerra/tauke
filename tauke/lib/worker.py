@@ -51,7 +51,7 @@ def _daemon_loop():
     while True:
         try:
             _poll_all_projects()
-        except OSError as e:
+        except Exception as e:
             _log.error("unhandled error in poll cycle: %s", e, exc_info=True)
         time.sleep(POLL_INTERVAL)
 
@@ -81,13 +81,13 @@ def _poll_all_projects():
 
         try:
             coord_local = coord_repo.ensure_coord(remote_url, coord_branch)
-        except OSError as e:
+        except Exception as e:
             _log.error("cannot reach coordination repo %s: %s", remote_url, e)
             continue
 
         try:
             coord_repo.write_worker_heartbeat(coord_local, handle, daily_cap, used)
-        except OSError as e:
+        except Exception as e:
             _log.error("heartbeat failed for %s: %s", remote_url, e)
 
         if remaining() < 5_000:
@@ -120,7 +120,7 @@ def _poll_all_projects():
 
         try:
             coord_repo.write_result(coord_local, result)
-        except OSError as e:
+        except Exception as e:
             _log.error("failed to write result for task %s: %s", task['id'][:8], e)
 
         used = get_usage()[0]
@@ -151,10 +151,10 @@ def _execute_task(task: dict, handle: str) -> dict:
             try:
                 git.checkout(workspace, commit)
                 _log.debug("checked out commit %s", commit[:8])
-            except OSError:
+            except Exception as e:
                 _log.warning(
-                    "could not checkout commit %s, staying on default branch",
-                    commit[:8],
+                    "could not checkout commit %s (%s), staying on default branch",
+                    commit[:8], e,
                 )
 
         prompt = task["prompt"]
@@ -205,7 +205,7 @@ def _execute_task(task: dict, handle: str) -> dict:
             pushed_branch, run_result["tokens_used"], run_result["summary"], error,
         )
 
-    except OSError as e:
+    except Exception as e:
         _log.error("task %s failed with exception: %s", task_id[:8], e, exc_info=True)
         return _result(task_id, handle, "error", None, 0, str(e)[:200], str(e))
     finally:

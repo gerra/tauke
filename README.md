@@ -13,8 +13,10 @@ No central server. Uses a private git repo as the message bus.
 ## Install
 
 ```bash
+pip install git+https://github.com/gerra/tauke.git
+# or, once published to PyPI:
 pip install tauke
-# or
+# or:
 pipx install tauke
 ```
 
@@ -135,10 +137,28 @@ Machine-local files (never committed):
   identity.json        ← your handle + worker config
   projects.json        ← list of registered project coord repos
   worker.pid           ← daemon PID
-  worker.log           ← daemon log
+  tauke.log            ← all logs (rotating, 5 MB × 3)
   coord-repos/         ← local clones of coordination repos
   workspaces/          ← temporary task workspaces (auto-cleaned)
 ```
+
+---
+
+## Debugging
+
+Everything tauke does — CLI commands and the worker daemon — writes to a single log file at `~/.tauke/tauke.log` on your machine. To watch it live:
+
+```bash
+tail -f ~/.tauke/tauke.log
+```
+
+If something goes wrong, share the last ~100 lines:
+
+```bash
+tail -n 100 ~/.tauke/tauke.log
+```
+
+Logs rotate automatically (5 MB × 3 files), so they won't grow unbounded.
 
 ---
 
