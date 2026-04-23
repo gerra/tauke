@@ -1,13 +1,12 @@
 """tauke status — show worker availability and token budgets."""
 
-import json
 import typer
 from datetime import datetime, timedelta, timezone
 from rich.console import Console
 from rich.table import Table
 
 from tauke.lib.config import coord_info
-from tauke.lib.coord_repo import ensure_coord
+from tauke.lib.coord_repo import ensure_coord, list_all_workers
 
 console = Console()
 
@@ -23,7 +22,7 @@ def status():
     console.print("Pulling coordination repo...")
     coord_local = ensure_coord(remote_url, coord_branch)
 
-    all_workers = _load_all_workers(coord_local)
+    all_workers = list_all_workers(coord_local)
 
     if not all_workers:
         console.print("[yellow]No workers registered yet.[/yellow]")
@@ -66,19 +65,6 @@ def status():
         )
 
     console.print(table)
-
-
-def _load_all_workers(coord_local) -> list[dict]:
-    workers_dir = coord_local / "workers"
-    result = []
-    for f in workers_dir.glob("*.json"):
-        if f.name == ".gitkeep":
-            continue
-        try:
-            result.append(json.loads(f.read_text()))
-        except (json.JSONDecodeError, OSError):
-            pass
-    return result
 
 
 def _is_online(last_seen_str: str, now: datetime) -> bool:

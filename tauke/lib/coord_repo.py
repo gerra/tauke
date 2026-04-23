@@ -282,9 +282,11 @@ def write_worker_heartbeat(
         )
 
 
-def list_available_workers(repo: Path, min_tokens: int = 5_000) -> list[dict]:
-    """Fetch all tauke-hb/* refs and return workers that meet the thresholds."""
-    # Prune deleted refs and fetch latest for every heartbeat branch.
+def list_all_workers(repo: Path) -> list[dict]:
+    """Fetch every tauke-hb/* ref and return each worker's raw heartbeat data,
+    with no availability/freshness filtering. Used by `tauke status` which
+    wants to show offline workers too.
+    """
     git.run(
         [
             "fetch", "--prune", "origin",
@@ -302,18 +304,26 @@ def list_available_workers(repo: Path, min_tokens: int = 5_000) -> list[dict]:
     refs = [r.strip() for r in refs_result.stdout.splitlines() if r.strip()]
     _log.debug("found %d heartbeat refs", len(refs))
 
-    available = []
-    now = datetime.now(timezone.utc)
+    workers = []
     for ref in refs:
         show = git.run(["show", f"{ref}:worker.json"], cwd=repo, check=False)
         if show.returncode != 0:
             _log.debug("ref %s has no worker.json, skipping", ref)
             continue
         try:
-            worker = json.loads(show.stdout)
+            workers.append(json.loads(show.stdout))
         except json.JSONDecodeError:
             _log.debug("ref %s has unparseable worker.json", ref)
-            continue
+    return workers
+
+
+def list_available_workers(repo: Path, min_tokens: int = 5_000) -> list[dict]:
+    """Return workers considered routable right now: heartbeat within 2min,
+    marked available, and enough remaining tokens.
+    """
+    now = datetime.now(timezone.utc)
+    available = []
+    for worker in list_all_workers(repo):
         if not worker.get("available"):
             _log.debug("worker %s marked unavailable", worker.get("handle"))
             continue
