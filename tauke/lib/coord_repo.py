@@ -7,7 +7,7 @@ Operations on the coordination git repo:
 
 import json
 import subprocess
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -26,7 +26,10 @@ def _local_clone_path(remote_url: str) -> Path:
 def ensure_coord(remote_url: str, coord_branch: str = "tauke-coord") -> Path:
     """
     Ensure a local clone of the project repo exists with the coord branch
-    checked out. Pulls latest on each call.
+    checked out. Pulls latest on each call; if the pull fails for any
+    reason (unstaged changes from a crashed worker, diverged history,
+    anything), hard-resets to origin — the coord clone is purely a local
+    mirror of shared state and nothing on it is worth keeping over sync.
     """
     dest = _local_clone_path(remote_url)
     _log.debug("ensure_coord %s branch=%s dest=%s", remote_url, coord_branch, dest)
@@ -37,9 +40,33 @@ def ensure_coord(remote_url: str, coord_branch: str = "tauke-coord") -> Path:
     else:
         try:
             git.pull(dest)
-        except OSError as e:
-            _log.warning("pull failed, continuing with local state: %s", e)
+        except Exception as e:
+            _log.warning(
+                "pull failed (%s) — discarding uncommitted changes and retrying",
+                e,
+            )
+            _discard_uncommitted(dest)
+            try:
+                git.pull(dest)
+            except Exception as e2:
+                _log.warning("retry pull still failed: %s — using local state", e2)
     return dest
+
+
+def _discard_uncommitted(repo: Path) -> None:
+    """Discard unstaged + untracked changes only. Preserves local commits
+    (e.g. a commit that was made but whose push got rejected due to a
+    race — we want to keep it so the next push can retry).
+
+    Anything unstaged on the coord clone comes from a crashed write
+    (file written but not yet committed), which has no value to preserve.
+    """
+    try:
+        git.run(["reset", "--hard", "HEAD"], cwd=repo, check=False)
+        git.run(["clean", "-fd"], cwd=repo, check=False)
+        _log.info("discarded uncommitted changes in %s", repo)
+    except Exception as e:
+        _log.error("could not discard uncommitted changes in %s: %s", repo, e)
 
 
 def _checkout_coord_branch(repo: Path, branch: str) -> None:
