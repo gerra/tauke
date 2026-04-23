@@ -140,6 +140,38 @@ def has_changes(repo: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+def uncommitted_files(cwd: Optional[Path] = None) -> list[str]:
+    """Return `git status --porcelain` lines (empty list if tree is clean)."""
+    result = run(["status", "--porcelain"], cwd=cwd, check=False)
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def unpushed_commits(cwd: Optional[Path] = None, branch: Optional[str] = None) -> int:
+    """Count local commits ahead of origin/<branch>.
+
+    Returns -1 if the remote-tracking branch doesn't exist (branch was
+    never pushed). Returns 0 if HEAD matches origin, or a positive count
+    of unpushed commits. Never raises — failures return 0.
+    """
+    ref = branch or current_branch(cwd)
+    probe = run(
+        ["rev-parse", "--verify", "--quiet", f"origin/{ref}"],
+        cwd=cwd, check=False,
+    )
+    if probe.returncode != 0:
+        return -1
+    result = run(
+        ["rev-list", "--count", f"origin/{ref}..HEAD"],
+        cwd=cwd, check=False,
+    )
+    if result.returncode != 0:
+        return 0
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return 0
+
+
 def init_bare_local(path: Path) -> None:
     import os
     path.mkdir(parents=True, exist_ok=True)

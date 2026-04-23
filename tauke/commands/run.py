@@ -60,6 +60,8 @@ def run(
         console.print(f"[red]Could not read git info:[/red] {e}")
         raise typer.Exit(1)
 
+    _warn_if_worker_wont_see_local_state(branch)
+
     context_files = [f.strip() for f in files.split(",")] if files else []
 
     task = create_task(
@@ -107,6 +109,46 @@ def run(
     )
 
     _print_result(result)
+
+
+def _warn_if_worker_wont_see_local_state(branch: str) -> None:
+    """Warn the orchestrator if local state won't reach the worker.
+
+    Workers clone from origin at a specific commit — they only see what's
+    been pushed. Uncommitted changes and local-only commits are invisible
+    to them. Prompt the user to confirm before spending worker tokens on
+    a stale snapshot.
+    """
+    dirty = git.uncommitted_files()
+    ahead = git.unpushed_commits(branch=branch)
+
+    if not dirty and ahead == 0:
+        return
+
+    console.print()
+    console.print(
+        "[yellow]Heads up: workers clone from origin — "
+        "they only see pushed state.[/yellow]"
+    )
+    if dirty:
+        console.print(f"  Uncommitted changes in {len(dirty)} file(s):")
+        for line in dirty[:5]:
+            console.print(f"    [dim]{line}[/dim]")
+        if len(dirty) > 5:
+            console.print(f"    [dim]... and {len(dirty) - 5} more[/dim]")
+    if ahead == -1:
+        console.print(
+            f"  Branch [cyan]{branch}[/cyan] has never been pushed to origin."
+        )
+    elif ahead > 0:
+        console.print(
+            f"  [cyan]{ahead}[/cyan] local commit(s) on "
+            f"[cyan]{branch}[/cyan] not yet pushed."
+        )
+    console.print()
+    if not typer.confirm("Continue anyway?", default=False):
+        _log.info("orchestrator aborted due to unpushed/uncommitted state")
+        raise typer.Abort()
 
 
 def _print_result(result: dict):
