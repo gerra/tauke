@@ -67,7 +67,7 @@ def _checkout_coord_branch(repo: Path, branch: str) -> None:
 def _ensure_structure(repo: Path) -> None:
     """Create the required directories and push."""
     _log.debug("ensuring coord repo structure in %s", repo)
-    for subdir in ("tasks", "claims", "results", "workers"):
+    for subdir in ("tasks", "claims", "results"):
         (repo / subdir).mkdir(parents=True, exist_ok=True)
         gitkeep = repo / subdir / ".gitkeep"
         if not gitkeep.exists():
@@ -190,11 +190,55 @@ def write_result(repo: Path, result: dict) -> None:
 
 
 # ── Workers ──────────────────────────────────────────────────────────────────
+#
+# Each worker owns a dedicated orphan branch `tauke-hb/<handle>` containing a
+# single `worker.json`. Heartbeats are written via `commit --amend` + force
+# push, so the branch stays at exactly one commit forever (no history growth).
+# Because only one writer ever touches `tauke-hb/<handle>`, force-pushes don't
+# race with anyone else.
+
+def _hb_branch(handle: str) -> str:
+    return f"tauke-hb/{handle}"
+
+
+def _hb_repo_path(remote_url: str, handle: str) -> Path:
+    repo_name = remote_url.rstrip("/").split("/")[-1].removesuffix(".git")
+    return COORD_REPOS_DIR / f"{repo_name}-hb-{handle}"
+
+
+def _ensure_hb_repo(remote_url: str, handle: str) -> Path:
+    """Local clone dedicated to this worker's heartbeat branch."""
+    dest = _hb_repo_path(remote_url, handle)
+    branch = _hb_branch(handle)
+    if not dest.exists():
+        _log.info("cloning %s for heartbeat branch %s", remote_url, branch)
+        git.clone(remote_url, dest)
+        result = git.run(
+            ["checkout", "-b", branch, f"origin/{branch}"],
+            cwd=dest, check=False,
+        )
+        if result.returncode != 0:
+            _log.info("branch %s not on remote — creating orphan", branch)
+            git.run(["checkout", "--orphan", branch], cwd=dest)
+            subprocess.run(
+                ["git", "rm", "-rf", "."], cwd=str(dest), capture_output=True,
+            )
+    return dest
+
 
 def write_worker_heartbeat(
     repo: Path, handle: str, daily_cap: int, tokens_used: int
 ) -> None:
-    path = repo / "workers" / f"{handle}.json"
+    """Push a heartbeat to the worker's dedicated tauke-hb/<handle> branch.
+
+    `repo` is the coord_local clone — we derive the remote URL from it so
+    callers don't need to pass extra arguments.
+    """
+    remote_url = git.current_remote_url(repo)
+    hb_local = _ensure_hb_repo(remote_url, handle)
+    branch = _hb_branch(handle)
+    path = hb_local / "worker.json"
+
     today = str(date.today())
     existing = {}
     if path.exists():
@@ -215,31 +259,63 @@ def write_worker_heartbeat(
         "available": True,
     }
     path.write_text(json.dumps(data, indent=2))
-    if git.has_changes(repo):
-        git.add_all(repo)
-        git.commit(repo, f"tauke: heartbeat {handle}")
-        git.push(repo)
+    git.add_all(hb_local)
+
+    has_head = git.run(
+        ["rev-parse", "--verify", "HEAD"], cwd=hb_local, check=False,
+    ).returncode == 0
+    if has_head:
+        git.run(["commit", "--amend", "--no-edit"], cwd=hb_local)
+    else:
+        git.run(["commit", "-m", f"tauke: heartbeat {handle}"], cwd=hb_local)
+
+    push = git.run(["push", "-f", "origin", branch], cwd=hb_local, check=False)
+    if push.returncode != 0:
+        _log.warning(
+            "heartbeat force-push failed for %s: %s",
+            handle, push.stderr.strip()[:200],
+        )
+    else:
         _log.debug(
             "heartbeat pushed for %s (%d/%d tokens used today)",
             handle, tokens_used, daily_cap,
         )
-    else:
-        _log.debug("heartbeat: no change for %s", handle)
 
 
 def list_available_workers(repo: Path, min_tokens: int = 5_000) -> list[dict]:
-    workers_dir = repo / "workers"
+    """Fetch all tauke-hb/* refs and return workers that meet the thresholds."""
+    # Prune deleted refs and fetch latest for every heartbeat branch.
+    git.run(
+        [
+            "fetch", "--prune", "origin",
+            "+refs/heads/tauke-hb/*:refs/remotes/origin/tauke-hb/*",
+        ],
+        cwd=repo, check=False,
+    )
+    refs_result = git.run(
+        [
+            "for-each-ref", "--format=%(refname:short)",
+            "refs/remotes/origin/tauke-hb/",
+        ],
+        cwd=repo, check=False,
+    )
+    refs = [r.strip() for r in refs_result.stdout.splitlines() if r.strip()]
+    _log.debug("found %d heartbeat refs", len(refs))
+
     available = []
     now = datetime.now(timezone.utc)
-    for f in workers_dir.glob("*.json"):
-        if f.name == ".gitkeep":
+    for ref in refs:
+        show = git.run(["show", f"{ref}:worker.json"], cwd=repo, check=False)
+        if show.returncode != 0:
+            _log.debug("ref %s has no worker.json, skipping", ref)
             continue
         try:
-            worker = json.loads(f.read_text())
+            worker = json.loads(show.stdout)
         except json.JSONDecodeError:
+            _log.debug("ref %s has unparseable worker.json", ref)
             continue
         if not worker.get("available"):
-            _log.debug("worker %s marked unavailable", f.stem)
+            _log.debug("worker %s marked unavailable", worker.get("handle"))
             continue
         last_seen_str = worker.get("last_seen")
         if last_seen_str:
@@ -249,7 +325,8 @@ def list_available_workers(repo: Path, min_tokens: int = 5_000) -> list[dict]:
             age = (now - last_seen).total_seconds()
             if age > 120:
                 _log.debug(
-                    "worker %s stale (last seen %.0fs ago)", f.stem, age
+                    "worker %s stale (last seen %.0fs ago)",
+                    worker.get("handle"), age,
                 )
                 continue
         remaining = worker.get("daily_cap", 0) - worker.get("tokens_used_today", 0)
@@ -258,7 +335,7 @@ def list_available_workers(repo: Path, min_tokens: int = 5_000) -> list[dict]:
         else:
             _log.debug(
                 "worker %s has only %d tokens remaining (min %d)",
-                f.stem, remaining, min_tokens,
+                worker.get("handle"), remaining, min_tokens,
             )
     _log.debug("found %d available worker(s)", len(available))
     return sorted(available, key=lambda w: w["remaining_tokens"], reverse=True)

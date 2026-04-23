@@ -90,13 +90,26 @@ All under `~/.tauke/`:
 
 ## Coordination branch layout
 
-The `tauke-coord` orphan branch (in the project repo):
+The `tauke-coord` orphan branch (in the project repo) — append-only log
+of task lifecycle events:
 ```
 tasks/{uuid}.json     # orchestrator writes; status: pending
 claims/{uuid}.json    # worker writes to claim (atomic via git push)
 results/{uuid}.json   # worker writes outcome + result_branch
-workers/{handle}.json # heartbeat + token budget, updated every 30s
 ```
+
+Heartbeats live on **per-worker orphan branches** `tauke-hb/<handle>`, one
+`worker.json` per branch, rewritten every 30s via `commit --amend` +
+`push --force`. Each worker owns its own ref — force-pushes never race
+with other workers, and the branch stays at exactly one commit forever
+(no history growth from heartbeat churn).
+
+`list_available_workers(coord_local)` fetches `refs/heads/tauke-hb/*` from
+origin and reads each `worker.json` via `git show`.
+
+`write_worker_heartbeat(coord_local, ...)` operates on a separate local
+clone at `~/.tauke/coord-repos/<project>-hb-<handle>/` to avoid switching
+branches in the shared coord working tree.
 
 ## Token tracking
 
