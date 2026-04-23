@@ -14,6 +14,7 @@ from tauke.lib import coord_repo, git_helpers as git
 from tauke.lib.claude_runner import run_claude
 from tauke.lib.config import WORKSPACES_DIR, WORKER_PID_FILE, identity, projects
 from tauke.lib.logger import get
+from tauke.lib import token_tracker
 from tauke.lib.token_tracker import get_usage, remaining
 
 _log = get("worker")
@@ -166,6 +167,7 @@ def _execute_task(task: dict, handle: str) -> dict:
 
         _log.info("running claude -p (task %s)", task_id[:8])
         run_result = run_claude(prompt, workspace)
+        token_tracker.add(run_result.get("tokens_used", 0))
         _log.info(
             "claude finished task %s: status=%s tokens=%d",
             task_id[:8], run_result['status'], run_result['tokens_used'],

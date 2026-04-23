@@ -1,49 +1,65 @@
 """
-Reads actual Claude Code token usage from ~/.claude/stats-cache.json.
-This is the same data shown by /usage in Claude Code — no manual tracking needed.
+Track tokens consumed today by this worker.
+
+Persists to ~/.tauke/usage.json. The daily counter resets automatically
+the first time it's read after the date changes. Source of truth is the
+tokens_used returned by each claude -p invocation (from the Anthropic
+API response), added here via `add()`.
+
+Prior versions of this file read ~/.claude/stats-cache.json, but that
+cache only refreshes during interactive /usage actions — not during
+claude -p runs — so before/after diffs were always zero. We now track
+usage ourselves.
 """
 
 import json
 from datetime import date
 from pathlib import Path
 
-from tauke.lib.config import identity, DEFAULT_WORKER_CAP
+from tauke.lib.config import TAUKE_DIR, identity, DEFAULT_WORKER_CAP
 from tauke.lib.logger import get
 
 _log = get("token_tracker")
 
-STATS_CACHE = Path.home() / ".claude" / "stats-cache.json"
+USAGE_FILE = TAUKE_DIR / "usage.json"
+
+
+def _load() -> dict:
+    if not USAGE_FILE.exists():
+        return {"date": "", "tokens": 0}
+    try:
+        return json.loads(USAGE_FILE.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        _log.warning("could not read usage.json: %s", e)
+        return {"date": "", "tokens": 0}
+
+
+def _save(data: dict) -> None:
+    TAUKE_DIR.mkdir(parents=True, exist_ok=True)
+    USAGE_FILE.write_text(json.dumps(data, indent=2))
 
 
 def today_tokens() -> int:
-    """
-    Read today's total token count across all models from Claude Code's
-    local stats cache. Returns 0 if the file doesn't exist or has no
-    entry for today.
-    """
-    if not STATS_CACHE.exists():
-        _log.debug("stats-cache.json not found at %s", STATS_CACHE)
-        return 0
-    try:
-        data = json.loads(STATS_CACHE.read_text())
-    except (json.JSONDecodeError, OSError) as e:
-        _log.warning("could not read stats-cache.json: %s", e)
-        return 0
-
+    data = _load()
     today = str(date.today())
-    for entry in data.get("dailyModelTokens", []):
-        if entry.get("date") == today:
-            total = sum(entry.get("tokensByModel", {}).values())
-            _log.debug("today's token usage from stats-cache: %d", total)
-            return total
-
-    _log.debug("no entry for today (%s) in stats-cache", today)
-    return 0
+    if data.get("date") != today:
+        return 0
+    return int(data.get("tokens", 0))
 
 
-def snapshot() -> int:
-    """Return current today's token total. Diff before/after a claude run to measure usage."""
-    return today_tokens()
+def add(tokens: int) -> int:
+    """Record token usage for a completed task. Returns the new daily total."""
+    if tokens <= 0:
+        return today_tokens()
+    today = str(date.today())
+    data = _load()
+    if data.get("date") != today:
+        _log.info("daily token counter reset (was %s, now %s)", data.get("date"), today)
+        data = {"date": today, "tokens": 0}
+    data["tokens"] = int(data.get("tokens", 0)) + int(tokens)
+    _save(data)
+    _log.debug("usage: +%d tokens (today total: %d)", tokens, data["tokens"])
+    return data["tokens"]
 
 
 def get_usage() -> tuple[int, int]:
