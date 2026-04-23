@@ -10,6 +10,7 @@ from tauke.commands.setup import setup
 from tauke.commands.init import init
 from tauke.commands.run import run
 from tauke.commands.pull import pull
+from tauke.commands.cancel import cancel
 from tauke.commands.status import status
 from tauke.commands.log import log
 from tauke.commands.install_skill import install_skill
@@ -34,6 +35,7 @@ app.command("setup")(setup)
 app.command("init")(init)
 app.command("run")(run)
 app.command("pull")(pull)
+app.command("cancel")(cancel)
 app.command("status")(status)
 app.command("log")(log)
 app.command("install-skill")(install_skill)
